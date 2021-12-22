@@ -1,0 +1,75 @@
+# Azure Devops Organization Backup Pipeline
+# This pipeline creates a zip of each repository in an organization and uploads it to an azure storage account
+
+trigger:
+- main
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+- name: devopsOrganization
+  type: string
+- name: storageAccountName
+  type: string
+- name: storageContainerName
+  type: string
+- name: azureSubscription
+  displayName: Azure Subscription for the Azure Resource Manager Connection
+  type: string
+
+steps:
+- bash: |
+    az extension add -n azure-devops
+  displayName: Install Azure DevOps CLI
+
+- bash: |
+    az devops configure --defaults organization=${{ parameters.devopsOrganization }}
+    DEVOPS_PROJECTS=$(az devops project list | jq -r .value[].name)
+
+    # Retrieve all Repositories for all DEVOPS_PROJECTS
+    declare -a REPOSITORIES=()
+    declare -a REPOSITORY_NAMES=()
+    for PROJECT in $DEVOPS_PROJECTS
+    do
+      REPOS=$(az repos list --project $PROJECT | jq -r .[].url)
+      
+      REPOSITORIES+=($REPOS)
+
+      REPO_NAMES=$(az repos list --project $PROJECT | jq -r .[].name)
+      REPOSITORY_NAMES+=($REPO_NAMES)
+    done
+    echo ${REPOSITORIES[@]}
+    echo ${REPOSITORY_NAMES[@]}
+    # Download zip for all REPOSITORIES
+    BRANCHES_TO_DOWNLOAD=("main")
+    POSITION=0
+    for REPO in ${REPOSITORIES[@]}
+    do
+      for BRANCH in ${BRANCHES_TO_DOWNLOAD[@]}
+      do
+        DOWNLOAD_URL="$REPO/items/items?path=/&versionDescriptor[version]=${BRANCH}&resolveLfs=true&\$format=zip&download=true"
+        echo $POSITION
+        echo ${REPOSITORY_NAMES[POSITION]}
+        FILENAME="${REPOSITORY_NAMES[POSITION]}_$BRANCH.zip"
+        echo "Downloading zip from $DOWNLOAD_URL to $FILENAME"
+        curl --output $FILENAME -X GET $DOWNLOAD_URL 
+      done
+      POSITION=$((POSITION+1))
+    done
+  displayName: Download Repos
+  env:
+    AZURE_DEVOPS_EXT_PAT: $(ACCESS_TOKEN)
+
+- task: CopyFiles@2
+  inputs:
+    SourceFolder: '$(System.DefaultWorkingDirectory)'
+    Contents: '**/*.zip'
+    TargetFolder: '$(System.ArtifactsDirectory)/backups/'
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: ${{ parameters.azureSubscription }}
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: 'az storage blob upload-batch -d ${{ parameters.storageContainerName }} --account-name ${{ parameters.storageAccountName }} -s "$(System.ArtifactsDirectory)/backups/"'
